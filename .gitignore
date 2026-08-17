@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# VSIX package
+extension.vsix
+
+# VS Code
+.vscode/settings.json
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+temp/

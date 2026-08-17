@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          New version (e.g. 0.2.3). If omitted, only builds without
+          version sync.
+        required: false
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run postinstall script (copy tokenizer)
+        run: node scripts/copy-tokenizer.js
+
+      # 构建前刷新硬编码目录快照；失败时保留仓库内旧快照，不阻断构建
+      - name: Refresh hardcoded catalog snapshot
+        run: node scripts/update-hardcoded-catalog.mjs
+
+      # 确定版本号来源：手动输入 > tag > 无
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "ver=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/v}"
+            echo "ver=${VER}" >> $GITHUB_OUTPUT
+          else
+            echo "ver=" >> $GITHUB_OUTPUT
+          fi
+
+      # 仅当解析到版本号时才执行同步、推送
+      - name: Sync and commit version
+        if: steps.ver.outputs.ver != ''
+        run: |
+          VER="${{ steps.ver.outputs.ver }}"
+          echo "Syncing package.json version to ${VER}"
+          npm version "$VER" --no-git-tag-version --allow-same-version
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src/hardcodedModelList.ts
+          MSG="chore: bump version to ${VER}, sync model list [skip ci]"
+          git diff --cached --quiet || git commit -m "$MSG"
+          # 优先推送 master（release 流程的版本同步提交应落在 master）；
+          # 仅当 master 不含触发提交时回退到其它包含该提交的分支。
+          BRANCH=$(git branch -r --contains "$GITHUB_SHA" \
+            | sed 's|.*origin/||' | grep -x 'master' | head -1)
+          if [ -z "$BRANCH" ]; then
+            BRANCH=$(git branch -r --contains "$GITHUB_SHA" \
+              | head -1 | sed 's|.*origin/||' | xargs)
+          fi
+          if [ -n "$BRANCH" ]; then
+            git push origin "HEAD:refs/heads/$BRANCH"
+          else
+            echo "No remote branch found, skipping push."
+          fi
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package extension (.vsix)
+        run: npx @vscode/vsce package -o extension.vsix
+
+      - name: Get version from package.json
+        id: version
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+
+      - name: Get tag name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      # tag push 时创建草稿 Release（含默认介绍）
+      - name: Create draft Release (tag push)
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body: |
+            # ${{ steps.tag.outputs.tag }}
+            [CHANGELOG](https://github.com/OnesoftQwQ/opencode-go-copilot)
+            了解详细变更。
+          draft: true
+          prerelease: false
+          files: extension.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 已发布的 Release 仅上传 .vsix，不修改用户写的介绍
+      - name: Upload .vsix to published Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: extension.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 上传 .vsix 作为 Actions 构建产物（备用）
+      - name: Upload .vsix as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-go-copilot-${{ steps.version.outputs.version }}.vsix
+          path: extension.vsix
+          if-no-files-found: error
+
+      # 发布到 VS Code Marketplace
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          npx @vscode/vsce publish -p "$VSCE_PAT" \
+            --packagePath extension.vsix --allow-all-proposed-apis

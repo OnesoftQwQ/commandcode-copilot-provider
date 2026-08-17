@@ -1,0 +1,87 @@
+name: Check for New API Models
+
+on:
+  schedule:
+    # Run weekly on Monday 08:00 UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    # Allow manual trigger
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check for new models
+        id: check
+        continue-on-error: true
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          node scripts/check-new-models.mjs > /tmp/check-result.json 2>/tmp/check-stderr.log
+          echo "result=$(cat /tmp/check-result.json | jq -c .)" >> $GITHUB_OUTPUT
+
+      - name: Parse and create issue
+        if: steps.check.outputs.result != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECK_RESULT: ${{ steps.check.outputs.result }}
+        run: |
+          NEW_COUNT=$(echo "$CHECK_RESULT" | jq '.newModelIds | length')
+          echo "New models found: $NEW_COUNT"
+
+          if [ "$NEW_COUNT" -gt 0 ]; then
+            # Build issue body using jq to avoid subshell issues
+            echo "$CHECK_RESULT" | jq -r '
+              "## New Model(s) Detected\n" +
+              "\n" +
+              "The API server now offers **\(.newModelIds | length)** model(s) that are not yet in the hardcoded built-in model list or Zen free model list.\n" +
+              "\n" +
+              "### New Models\n" +
+              "\n" +
+              "| API ID | Name | Context | Max Output | Vision | Reasoning | Tool Call | Thinking Mode |\n" +
+              "|--------|------|---------|------------|--------|-----------|-----------|---------------|\n" +
+              (.newModelDetails | map(
+                "| `" + (.id // "?") + "` | " + (.name // "?") + " | " + (if .context then (.context | tostring) else "?" end) + " | " + (if .output then (.output | tostring) else "?" end) + " | " + (if .vision then "✅" else "❌" end) + " | " + (if .reasoning then "✅" else "❌" end) + " | " + (if .tool_call then "✅" else "❌" end) + " | " + (.detectedThinkingMode // "?") + " |"
+              ) | join("\n")) +
+              "\n\n" +
+              "### How to Add\n" +
+              "\n" +
+              "1. Add the model(s) to `src/models.ts` (built-in) or `src/zen/zenModels.ts` (Zen free)\n" +
+              "2. Configure `thinkingMode`, `apiMode`, `vision`, context length, max tokens etc.\n" +
+              "3. Run `npm run compile` to verify\n" +
+              "4. Update `AGENTS.md` if adding new model series"
+            ' > /tmp/issue-body.md
+
+            echo "=== Issue Body ==="
+            cat /tmp/issue-body.md
+
+            # Check if an issue already exists
+            EXISTING_ISSUE=$(gh issue list \
+              --label "auto-model-discovery" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty' 2>/dev/null)
+
+            if [ -n "$EXISTING_ISSUE" ]; then
+              echo "Updating existing issue #$EXISTING_ISSUE"
+              gh issue comment "$EXISTING_ISSUE" \
+                --body "🔄 Updated check — **${NEW_COUNT}** new model(s) detected as of $(date -u '+%Y-%m-%d %H:%M UTC')"
+              gh issue edit "$EXISTING_ISSUE" \
+                --title "New API models detected: ${NEW_COUNT} model(s) to add"
+            else
+              echo "Creating new issue"
+              gh issue create \
+                --title "New API models detected: ${NEW_COUNT} model(s) to add" \
+                --label "auto-model-discovery" \
+                --body "$(cat /tmp/issue-body.md)"
+            fi
+          fi
+            fi
+          fi
