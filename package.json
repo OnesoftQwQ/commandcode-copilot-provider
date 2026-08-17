@@ -394,7 +394,7 @@
 		"test:vision-history": "npm run compile && node scripts/test-vision-history.mjs",
 		"lint": "eslint",
 		"watch": "tsc -watch -p ./",
-		"build": "npx @vscode/vsce package -o extension.vsix",
+		"build": "npx @vscode/vsce package --no-dependencies -o extension.vsix",
 		"postinstall": "node scripts/copy-tokenizer.js"
 	},
 	"dependencies": {
