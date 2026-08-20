@@ -89,7 +89,7 @@ export interface ModelPreset {
     id: string;
     label: string;
     temperature: number;
-    top_p: number;
+    top_p?: number;
 }
 
 /**

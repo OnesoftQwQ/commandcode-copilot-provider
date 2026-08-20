@@ -91,6 +91,8 @@ function getRequestedReasoningEffort(options) {
 class CommandCodeChatModelProvider {
     secrets;
     statusBarItem;
+    _onDidChangeLanguageModelChatInformation = new vscode.EventEmitter();
+    onDidChangeLanguageModelChatInformation = this._onDidChangeLanguageModelChatInformation.event;
     /** Track last request completion time for delay calculation. */
     _lastRequestTime = null;
     /**
@@ -124,6 +126,14 @@ class CommandCodeChatModelProvider {
     async provideLanguageModelChatInformation(options, _token) {
         void _token;
         return (0, provideModel_1.prepareLanguageModelChatInformation)(options, _token, this.secrets);
+    }
+    async refreshLanguageModels(token) {
+        const result = await (0, provideModel_1.forceRefreshLanguageModelChatInformation)(token, this.secrets);
+        this._onDidChangeLanguageModelChatInformation.fire();
+        return result;
+    }
+    dispose() {
+        this._onDidChangeLanguageModelChatInformation.dispose();
     }
     /**
      * Returns the number of tokens for a given text using the model specific tokenizer logic.
@@ -197,6 +207,7 @@ class CommandCodeChatModelProvider {
                         const matchedPreset = presets.find((p) => p.id === tempPreset);
                         if (matchedPreset) {
                             um.temperature = matchedPreset.temperature;
+                            um.top_p = matchedPreset.top_p;
                         }
                     }
                     else {
@@ -855,6 +866,10 @@ class CommandCodeChatModelProvider {
             if (entered && entered.trim()) {
                 apiKey = entered.trim();
                 await this.secrets.store("commandcode.apiKey", apiKey);
+                const refreshTokenSource = new vscode.CancellationTokenSource();
+                void this.refreshLanguageModels(refreshTokenSource.token)
+                    .catch((error) => logger_1.logger.error("models.apiKeyRefresh.failed", { error: String(error) }))
+                    .finally(() => refreshTokenSource.dispose());
             }
         }
         return apiKey;

@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resetAutoDiscoveryState = resetAutoDiscoveryState;
+exports.forceRefreshLanguageModelChatInformation = forceRefreshLanguageModelChatInformation;
 exports.prepareLanguageModelChatInformation = prepareLanguageModelChatInformation;
 const vscode = __importStar(require("vscode"));
 const logger_1 = require("./logger");
@@ -73,7 +74,9 @@ const DEFAULT_COMMANDCODE_MODEL_IDS = [
 let isUpdatingModels = false;
 let lastModelsUpdate = 0;
 let cachedModelInfos = null;
-async function runModelPass(secrets) {
+let lastRefreshResult = null;
+let forcedRefreshQueue = Promise.resolve();
+async function runModelPass(secrets, token) {
     // Metadata is optional. Loading it improves names, limits, vision flags,
     // and reasoning controls, but never prevents the provider from working.
     await (0, modelsDev_1.ensureModelsDevLoaded)();
@@ -81,12 +84,34 @@ async function runModelPass(secrets) {
     const enableAutoDiscovery = config.get("enableAutoModelDiscovery", true);
     let modelIds = [...DEFAULT_COMMANDCODE_MODEL_IDS];
     let modelSource = "fallback";
+    let status = "auto-discovery-disabled";
+    let refreshError;
     if (enableAutoDiscovery) {
         const apiKey = await secrets.get("commandcode.apiKey");
-        const liveIds = await (0, apiModelList_1.getApiModelIds)(apiKey);
-        if (liveIds.size > 0) {
-            modelIds = [...liveIds];
+        const abortController = new AbortController();
+        const cancellation = token.onCancellationRequested(() => abortController.abort());
+        const apiResult = await (0, apiModelList_1.getApiModelIds)(apiKey, abortController.signal).finally(() => cancellation.dispose());
+        refreshError = apiResult.error;
+        if (apiResult.ids.size > 0) {
+            modelIds = [...apiResult.ids];
             modelSource = "api";
+        }
+        switch (apiResult.status) {
+            case "success":
+                status = apiResult.ids.size > 0 ? "api" : "api-empty";
+                break;
+            case "cached":
+                status = "cached";
+                break;
+            case "stale":
+                status = "stale";
+                break;
+            case "missing-key":
+                status = "missing-api-key";
+                break;
+            case "error":
+                status = "api-error";
+                break;
         }
     }
     const showDeprecated = config.get("showDeprecatedModels", false);
@@ -100,7 +125,7 @@ async function runModelPass(secrets) {
         source: modelSource,
         ids: infos.map((info) => info.id).join(", "),
     });
-    return infos;
+    return { models: infos, status, error: refreshError };
 }
 async function waitForPendingUpdate(token) {
     while (isUpdatingModels && !token.isCancellationRequested) {
@@ -108,12 +133,49 @@ async function waitForPendingUpdate(token) {
     }
 }
 function resetAutoDiscoveryState() {
-    isUpdatingModels = false;
     lastModelsUpdate = 0;
     cachedModelInfos = null;
+    lastRefreshResult = null;
     (0, apiModelList_1.clearApiModelCache)();
     (0, modelsDev_1.clearModelsDevCache)();
     logger_1.logger.info("models.discovery", { action: "reset" });
+}
+async function updateModelCache(token, secrets) {
+    isUpdatingModels = true;
+    try {
+        const result = await runModelPass(secrets, token);
+        if (token.isCancellationRequested) {
+            throw new vscode.CancellationError();
+        }
+        cachedModelInfos = result.models;
+        lastRefreshResult = result;
+        lastModelsUpdate = Date.now();
+        return result;
+    }
+    catch (error) {
+        logger_1.logger.error("models.discovery", {
+            action: "error",
+            error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+    }
+    finally {
+        isUpdatingModels = false;
+    }
+}
+async function forceRefreshLanguageModelChatInformation(token, secrets) {
+    const refresh = forcedRefreshQueue.then(async () => {
+        if (isUpdatingModels) {
+            await waitForPendingUpdate(token);
+        }
+        if (token.isCancellationRequested) {
+            throw new vscode.CancellationError();
+        }
+        resetAutoDiscoveryState();
+        return updateModelCache(token, secrets);
+    });
+    forcedRefreshQueue = refresh.then(() => undefined, () => undefined);
+    return refresh;
 }
 async function prepareLanguageModelChatInformation(_options, token, secrets) {
     if (token.isCancellationRequested) {
@@ -121,24 +183,22 @@ async function prepareLanguageModelChatInformation(_options, token, secrets) {
     }
     const updateInterval = vscode.workspace.getConfiguration("commandcode")
         .get("modelsDevUpdateInterval", 60 * 1000);
-    const now = Date.now();
-    if (isUpdatingModels) {
-        await waitForPendingUpdate(token);
-    }
-    else if (now - lastModelsUpdate >= updateInterval) {
-        isUpdatingModels = true;
+    while (Date.now() - lastModelsUpdate >= updateInterval) {
+        if (token.isCancellationRequested) {
+            return cachedModelInfos ?? [];
+        }
+        if (isUpdatingModels) {
+            await waitForPendingUpdate(token);
+            continue;
+        }
         try {
-            cachedModelInfos = await runModelPass(secrets);
-            lastModelsUpdate = Date.now();
+            await updateModelCache(token, secrets);
         }
         catch (error) {
-            logger_1.logger.error("models.discovery", {
-                action: "error",
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-        finally {
-            isUpdatingModels = false;
+            if (error instanceof vscode.CancellationError) {
+                return cachedModelInfos ?? [];
+            }
+            return cachedModelInfos ?? lastRefreshResult?.models ?? [];
         }
     }
     return cachedModelInfos ?? [];

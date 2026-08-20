@@ -131,6 +131,9 @@ declare module "vscode" {
 	};
 
 	export interface LanguageModelChatProvider<T extends LanguageModelChatInformation = LanguageModelChatInformation> {
+		/** An optional event fired when the available set of language models changes. */
+		readonly onDidChangeLanguageModelChatInformation?: Event<void>;
+
 		provideLanguageModelChatInformation(options: PrepareLanguageModelChatModelOptions, token: CancellationToken): ProviderResult<T[]>;
 		provideLanguageModelChatResponse(
 			model: T,

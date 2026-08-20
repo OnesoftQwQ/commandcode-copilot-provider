@@ -44,6 +44,7 @@ const versionManager_1 = require("./versionManager");
 const commitMessageGenerator_1 = require("./gitCommit/commitMessageGenerator");
 const tokenizerManager_1 = require("./tokenizer/tokenizerManager");
 const provideModel_1 = require("./provideModel");
+const modelPreset_1 = require("./modelPreset");
 // ---- Walkthrough / Welcome constants ----
 /** memento key tracking whether the welcome walkthrough has been shown. */
 const WELCOME_SHOWN_KEY = "commandcode.welcomeShown";
@@ -55,10 +56,10 @@ function activate(context) {
     logger_1.logger.info("extension.activate", { version: versionManager_1.VersionManager.getVersion() });
     // Initialize TokenizerManager with extension path
     tokenizerManager_1.TokenizerManager.initialize(context.extensionPath);
-    const tokenCountStatusBarItem = (0, statusBar_1.initStatusBar)(context, context.secrets);
+    const tokenCountStatusBarItem = (0, statusBar_1.initStatusBar)(context);
     const provider = new provider_1.CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
     // Register the CommandCode provider under the vendor id used in package.json
-    vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
+    context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("commandcode", provider), provider);
     // Management command to configure API key
     context.subscriptions.push(vscode.commands.registerCommand("commandcode.setApiKey", async () => {
         const existing = await context.secrets.get("commandcode.apiKey");
@@ -75,49 +76,60 @@ function activate(context) {
         if (!apiKey.trim()) {
             await context.secrets.delete("commandcode.apiKey");
             vscode.window.showInformationMessage((0, localize_1.l10n)("CommandCode API key cleared."));
+            await refreshModels(provider, false);
             return;
         }
         await context.secrets.store("commandcode.apiKey", apiKey.trim());
         vscode.window.showInformationMessage((0, localize_1.l10n)("CommandCode API key saved."));
+        await refreshModels(provider, false);
     }));
     // manually trigger model list update command
     context.subscriptions.push(vscode.commands.registerCommand("commandcode.updateModelList", async () => {
         try {
-            // dummy silent option, not used
-            (0, provideModel_1.resetAutoDiscoveryState)();
-            await (0, provideModel_1.prepareLanguageModelChatInformation)({ silent: true }, new vscode.CancellationTokenSource().token, context.secrets);
-            vscode.window.showInformationMessage((0, localize_1.l10n)("CommandCode model list updated successfully."));
+            await refreshModels(provider, true);
         }
         catch (error) {
+            if (error instanceof vscode.CancellationError) {
+                vscode.window.showInformationMessage((0, localize_1.l10n)("CommandCode model list refresh canceled."));
+                return;
+            }
             logger_1.logger.error("models.update.failed", { error: String(error) });
             vscode.window.showErrorMessage((0, localize_1.l10n)("Failed to update CommandCode model list. See output for details."));
         }
     }));
     // Command to open the CommandCode website to get an API key
-    context.subscriptions.push(vscode.commands.registerCommand("commandcode.getApiKey", () => {
-        vscode.env.openExternal(vscode.Uri.parse("https://commandcode.ai"));
+    context.subscriptions.push(vscode.commands.registerCommand("commandcode.getApiKey", async () => {
+        await vscode.env.openExternal(vscode.Uri.parse("https://commandcode.ai"));
     }));
     // Command to open extension settings
-    context.subscriptions.push(vscode.commands.registerCommand("commandcode.openSettings", () => {
-        vscode.commands.executeCommand("workbench.action.openSettings", "@ext:OnesoftQwQ.commandcode-copilot-provider");
+    context.subscriptions.push(vscode.commands.registerCommand("commandcode.openSettings", async () => {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:OnesoftQwQ.commandcode-copilot-provider");
     }));
     // Register the generateGitCommitMessage command handler
     context.subscriptions.push(vscode.commands.registerCommand("commandcode.generateGitCommitMessage", async (scm) => {
-        (0, commitMessageGenerator_1.generateCommitMsg)(context.secrets, scm);
+        await (0, commitMessageGenerator_1.generateCommitMsg)(context.secrets, scm, () => {
+            const refreshTokenSource = new vscode.CancellationTokenSource();
+            void provider.refreshLanguageModels(refreshTokenSource.token)
+                .catch((error) => logger_1.logger.error("models.apiKeyRefresh.failed", { error: String(error) }))
+                .finally(() => refreshTokenSource.dispose());
+        });
     }), vscode.commands.registerCommand("commandcode.abortGitCommitMessage", () => {
         (0, commitMessageGenerator_1.abortCommitGeneration)();
     }));
     // Register the setModelPreset command: user can select a preset via QuickPick
     context.subscriptions.push(vscode.commands.registerCommand("commandcode.setModelPreset", async () => {
-        const config = vscode.workspace.getConfiguration();
-        const presets = config.get("commandcode.modelPresets", []);
-        const currentPresetId = config.get("commandcode.modelPreset", "custom");
-        const currentTemp = config.get("commandcode.temperature", null);
-        const currentTopP = config.get("commandcode.top_p", null);
+        const resource = vscode.window.activeTextEditor?.document.uri;
+        const config = vscode.workspace.getConfiguration("commandcode", resource);
+        const presets = config.get("modelPresets", []);
+        const currentPresetId = config.get("modelPreset", "custom");
+        const currentTemp = config.get("temperature", null);
+        const currentTopP = config.get("top_p", null);
         // Mark the currently active preset with " (当前)"
-        const presetItems = presets.map((p) => ({
-            label: `${(0, localize_1.l10n)(p.label)} (${p.temperature})${p.id === currentPresetId ? (0, localize_1.l10n)(" (current)") : ""}`,
-            presetId: p.id,
+        const presetItems = presets
+            .filter((preset) => preset.id.trim() && Number.isFinite(preset.temperature))
+            .map((preset) => ({
+            label: `${(0, localize_1.l10n)(preset.label)} (${(0, localize_1.l10nFormat)(preset.top_p === undefined ? "temperature: {0}" : "temperature: {0}, top_p: {1}", preset.temperature, ...(preset.top_p === undefined ? [] : [preset.top_p]))})${preset.id === currentPresetId ? (0, localize_1.l10n)(" (current)") : ""}`,
+            action: { kind: "preset", preset },
         }));
         // Mark custom option with current values if active
         const isCustomActive = currentPresetId === "custom";
@@ -127,6 +139,7 @@ function activate(context) {
                 : "");
         const customItem = {
             label: customLabel,
+            action: { kind: "custom" },
         };
         const items = [
             ...presetItems,
@@ -142,61 +155,39 @@ function activate(context) {
         if (!picked) {
             return;
         }
-        const presetId = picked.presetId;
-        if (presetId) {
+        if (picked.action?.kind === "preset") {
             // User selected a named preset
-            const matchedPreset = presets.find((p) => p.id === presetId);
-            if (matchedPreset) {
-                await config.update("commandcode.modelPreset", matchedPreset.id, vscode.ConfigurationTarget.Global);
-                await config.update("commandcode.temperature", matchedPreset.temperature, vscode.ConfigurationTarget.Global);
-                vscode.window.showInformationMessage((0, localize_1.l10nFormat)("Set to temperature: {0} ({1})", String(matchedPreset.temperature), (0, localize_1.l10n)(matchedPreset.label)));
-            }
+            const matchedPreset = picked.action.preset;
+            await config.update("modelPreset", matchedPreset.id, getConfigurationTarget(config, "modelPreset"));
+            vscode.window.showInformationMessage(matchedPreset.top_p === undefined
+                ? (0, localize_1.l10nFormat)("Set to temperature: {0} ({1})", matchedPreset.temperature, (0, localize_1.l10n)(matchedPreset.label))
+                : (0, localize_1.l10nFormat)("Set to temp: {0}, top_p: {1} ({2})", matchedPreset.temperature, matchedPreset.top_p, (0, localize_1.l10n)(matchedPreset.label)));
         }
-        else {
+        else if (picked.action?.kind === "custom") {
             // User chose "Custom (manual input)"
-            const currentVal = currentTemp !== null && currentTopP !== null
-                ? `${currentTemp},${currentTopP}`
-                : "";
             const inputValue = await vscode.window.showInputBox({
                 title: (0, localize_1.l10n)("Enter custom temperature"),
                 prompt: (0, localize_1.l10n)("Enter a single number for temperature only (<=2), or two comma-separated numbers for temperature and top_p (temp<=2, top_p<=1), e.g.: 0.7 or 0.7,0.95"),
-                value: currentVal,
+                value: (0, modelPreset_1.formatCustomPresetInput)(currentTemp, currentTopP),
                 validateInput: (val) => {
-                    const trimmed = val.trim();
-                    if (!trimmed) {
-                        return (0, localize_1.l10n)("Please enter at least temperature value");
-                    }
-                    const parts = trimmed.split(",");
-                    if (parts.length > 2) {
-                        return (0, localize_1.l10n)("Please enter at most two numbers separated by a comma");
-                    }
-                    const temp = parseFloat(parts[0].trim());
-                    if (isNaN(temp) || temp < 0 || temp > 2) {
-                        return (0, localize_1.l10n)("Temperature must be between 0.0 and 2.0");
-                    }
-                    if (parts.length === 2) {
-                        const topP = parseFloat(parts[1].trim());
-                        if (isNaN(topP) || topP < 0 || topP > 1) {
-                            return (0, localize_1.l10n)("top_p must be between 0.0 and 1.0");
-                        }
-                    }
-                    return null;
+                    const parsed = (0, modelPreset_1.parseCustomPresetInput)(val);
+                    return parsed.error ? (0, localize_1.l10n)(parsed.error) : null;
                 },
                 ignoreFocusOut: true,
             });
             if (inputValue !== undefined) {
-                const trimmed = inputValue.trim();
-                const parts = trimmed.split(",");
-                const tempNum = parseFloat(parts[0].trim());
-                await config.update("commandcode.modelPreset", "custom", vscode.ConfigurationTarget.Global);
-                await config.update("commandcode.temperature", tempNum, vscode.ConfigurationTarget.Global);
-                if (parts.length === 2) {
-                    const topPNum = parseFloat(parts[1].trim());
-                    await config.update("commandcode.top_p", topPNum, vscode.ConfigurationTarget.Global);
-                    vscode.window.showInformationMessage((0, localize_1.l10nFormat)("Set to temp: {0}, top_p: {1} (custom)", String(tempNum), String(topPNum)));
+                const parsed = (0, modelPreset_1.parseCustomPresetInput)(inputValue);
+                if (!parsed.value) {
+                    return;
+                }
+                await config.update("modelPreset", "custom", getConfigurationTarget(config, "modelPreset"));
+                await config.update("temperature", parsed.value.temperature, getConfigurationTarget(config, "temperature"));
+                await config.update("top_p", parsed.value.topP ?? null, getConfigurationTarget(config, "top_p"));
+                if (parsed.value.topP !== undefined) {
+                    vscode.window.showInformationMessage((0, localize_1.l10nFormat)("Set to temp: {0}, top_p: {1} (custom)", parsed.value.temperature, parsed.value.topP));
                 }
                 else {
-                    vscode.window.showInformationMessage((0, localize_1.l10nFormat)("Set to temperature: {0} (custom)", String(tempNum)));
+                    vscode.window.showInformationMessage((0, localize_1.l10nFormat)("Set to temperature: {0} (custom)", parsed.value.temperature));
                 }
             }
         }
@@ -211,6 +202,32 @@ function activate(context) {
         logger_1.logger.error("models.warmup.failed", {
             error: error instanceof Error ? error.message : String(error),
         });
+    });
+    const modelDiscoverySettings = [
+        "commandcode.enableAutoModelDiscovery",
+        "commandcode.showDeprecatedModels",
+        "commandcode.modelsDevMirrorUrl",
+        "commandcode.modelsDevMirrorToken",
+    ];
+    let settingsRefreshTokenSource;
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!modelDiscoverySettings.some((key) => event.affectsConfiguration(key))) {
+            return;
+        }
+        settingsRefreshTokenSource?.cancel();
+        settingsRefreshTokenSource?.dispose();
+        settingsRefreshTokenSource = new vscode.CancellationTokenSource();
+        void provider.refreshLanguageModels(settingsRefreshTokenSource.token).catch((error) => {
+            if (!(error instanceof vscode.CancellationError)) {
+                logger_1.logger.error("models.settingsRefresh.failed", { error: String(error) });
+            }
+        });
+    }));
+    context.subscriptions.push({
+        dispose: () => {
+            settingsRefreshTokenSource?.cancel();
+            settingsRefreshTokenSource?.dispose();
+        },
     });
     // Show welcome walkthrough on first install (when no API key is configured)
     showWelcomeIfNeeded(context);
@@ -243,4 +260,37 @@ async function showWelcomeIfNeeded(context) {
     }
 }
 function deactivate() { }
+function getConfigurationTarget(config, key) {
+    const inspected = config.inspect(key);
+    if (inspected?.workspaceFolderValue !== undefined) {
+        return vscode.ConfigurationTarget.WorkspaceFolder;
+    }
+    if (inspected?.workspaceValue !== undefined) {
+        return vscode.ConfigurationTarget.Workspace;
+    }
+    return vscode.ConfigurationTarget.Global;
+}
+async function refreshModels(provider, announceResult) {
+    const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: (0, localize_1.l10n)("Refreshing CommandCode model list..."),
+        cancellable: announceResult,
+    }, async (_progress, token) => provider.refreshLanguageModels(token));
+    if (!announceResult) {
+        return result;
+    }
+    if (result.status === "api") {
+        vscode.window.showInformationMessage((0, localize_1.l10nFormat)("CommandCode model list updated successfully ({0} models).", result.models.length));
+    }
+    else if (result.status === "auto-discovery-disabled") {
+        vscode.window.showWarningMessage((0, localize_1.l10n)("Automatic model discovery is disabled; using the built-in model list."));
+    }
+    else if (result.status === "missing-api-key") {
+        vscode.window.showWarningMessage((0, localize_1.l10n)("No CommandCode API key is configured; using the built-in model list."));
+    }
+    else {
+        vscode.window.showWarningMessage((0, localize_1.l10nFormat)("Unable to load the live model list; using {0} fallback models.", result.models.length));
+    }
+    return result;
+}
 //# sourceMappingURL=extension.js.map

@@ -4,6 +4,8 @@ const zhCN: Record<string, string> = {
 	// statusBar
 	"Token Usage": "Token 使用量",
 	"Token usage": "Token 使用量",
+	"Input": "输入",
+	"Output": "输出",
 
 	// extension.ts - API key prompts
 	"CommandCode Provider API Key": "CommandCode 提供商 API 密钥",
@@ -11,6 +13,13 @@ const zhCN: Record<string, string> = {
 	"Enter your CommandCode API key": "输入您的 CommandCode API 密钥",
 	"CommandCode API key cleared.": "CommandCode API 密钥已清除。",
 	"CommandCode API key saved.": "CommandCode API 密钥已保存。",
+	"Refreshing CommandCode model list...": "正在刷新 CommandCode 模型列表...",
+	"CommandCode model list refresh canceled.": "已取消刷新 CommandCode 模型列表。",
+	"CommandCode model list updated successfully ({0} models).": "CommandCode 模型列表已更新（{0} 个模型）。",
+	"Failed to update CommandCode model list. See output for details.": "更新 CommandCode 模型列表失败，请查看输出了解详情。",
+	"Automatic model discovery is disabled; using the built-in model list.": "自动模型发现已关闭，正在使用内置模型列表。",
+	"No CommandCode API key is configured; using the built-in model list.": "尚未配置 CommandCode API 密钥，正在使用内置模型列表。",
+	"Unable to load the live model list; using {0} fallback models.": "无法加载实时模型列表，正在使用 {0} 个备用模型。",
 
 	// provider.ts
 	"CommandCode API key not found": "未找到 CommandCode API 密钥",
@@ -23,6 +32,15 @@ const zhCN: Record<string, string> = {
 	"({0} cached, {1}%)": "(已缓存 {0}, 命中率 {1}%)",
 
 	"No changes found in any workspace repositories.": "在任何工作区仓库中均未发现更改。",
+	"A commit message is already being generated.": "已有一个提交消息生成任务正在运行。",
+	"Commit message generation canceled.": "已取消生成提交消息。",
+	"repository": "仓库",
+	"Failed to generate a commit message for {0}: {1}": "为 {0} 生成提交消息失败：{1}",
+	"Generate for all repositories with changes": "为所有有更改的仓库生成",
+	"Generate commit messages for {0} repositories": "为 {0} 个仓库生成提交消息",
+	"Select repository for commit message generation": "选择要生成提交消息的仓库",
+	"No changes in repository {0} for commit message": "仓库 {0} 中没有可用于生成提交消息的更改",
+	"Generating commit message for {0}...": "正在为 {0} 生成提交消息...",
 	"Git extension not found": "未找到 Git 扩展",
 	"No Git repositories available": "没有可用的 Git 仓库",
 	"Repository not found for provided SCM": "未找到指定 SCM 对应的仓库",
@@ -73,6 +91,8 @@ const zhCN: Record<string, string> = {
 	"Custom (manual input)": "自定义 (手动输入)",
 	" (current)": " (当前)",
 	"(current, temperature: {0}, top_p: {1})": "(当前, 温度: {0}, top_p: {1})",
+	"temperature: {0}": "温度: {0}",
+	"temperature: {0}, top_p: {1}": "温度: {0}, top_p: {1}",
 	"Set Model Preset": "设置模型预设",
 	"Select a preset": "选择一个档位",
 	"Enter custom temperature": "输入自定义温度",
@@ -88,6 +108,7 @@ const zhCN: Record<string, string> = {
 	"Set to temperature: {0} ({1})": "已设为温度 {0} ({1})",
 	"Set to temperature: {0} (custom)": "已设为温度 {0} (自定义)",
 	"Set to temp: {0}, top_p: {1} (custom)": "已设为温度 {0}, top_p {1} (自定义)",
+	"Set to temp: {0}, top_p: {1} ({2})": "已设为温度 {0}, top_p {1} ({2})",
 };
 
 /**

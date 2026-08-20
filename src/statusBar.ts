@@ -13,16 +13,38 @@ let cumulativeOutputTokens = 0;
 let cumulativeCacheHitTokens = 0;
 let cumulativeCacheMissTokens = 0;
 
-export function initStatusBar(context: vscode.ExtensionContext, _secrets: vscode.SecretStorage): vscode.StatusBarItem {
-    void _secrets;
+const TOKEN_INDICATOR_SETTING = "commandcode.enableThirdPartyTokenIndicator";
+
+function isTokenIndicatorEnabled(): boolean {
+    return vscode.workspace.getConfiguration().get<boolean>(TOKEN_INDICATOR_SETTING, true);
+}
+
+function applyStatusBarVisibility(item: vscode.StatusBarItem, resetOnShow = false): void {
+    if (isTokenIndicatorEnabled()) {
+        if (resetOnShow) {
+            resetCumulativeCounters();
+            updateCumulativeTooltip(item);
+        }
+        item.show();
+    } else {
+        item.hide();
+    }
+}
+
+export function initStatusBar(context: vscode.ExtensionContext): vscode.StatusBarItem {
     resetCumulativeCounters();
 
     const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     item.name = l10n("Token Usage");
     item.text = "$(symbol-numeric) CommandCode";
-    item.tooltip = l10n("Token usage");
+    updateCumulativeTooltip(item);
     context.subscriptions.push(item);
-    item.show();
+    applyStatusBarVisibility(item);
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration(TOKEN_INDICATOR_SETTING)) {
+            applyStatusBarVisibility(item, isTokenIndicatorEnabled());
+        }
+    }));
     logger.debug("statusBar.init", { provider: "commandcode" });
     return item;
 }
@@ -87,13 +109,13 @@ export function recordUsage(usage: StreamUsage): void {
 
 export function updateCumulativeTooltip(statusBarItem: vscode.StatusBarItem): void {
     const lines: string[] = [];
-    let inputLine = `↑ ${formatTokenCount(cumulativeInputTokens)}`;
+    let inputLine = `${l10n("Input")}: ${formatTokenCount(cumulativeInputTokens)}`;
     if (cumulativeCacheHitTokens > 0 || cumulativeCacheMissTokens > 0) {
         const totalCache = cumulativeCacheHitTokens + cumulativeCacheMissTokens;
         const hitRate = totalCache > 0 ? Math.round((cumulativeCacheHitTokens / totalCache) * 100) : 0;
         inputLine += ` ${l10nFormat("({0} cached, {1}%)", formatTokenCount(cumulativeCacheHitTokens), hitRate)}`;
     }
     lines.push(inputLine);
-    lines.push(`↓ ${formatTokenCount(cumulativeOutputTokens)}`);
+    lines.push(`${l10n("Output")}: ${formatTokenCount(cumulativeOutputTokens)}`);
     statusBarItem.tooltip = lines.join("\n");
 }

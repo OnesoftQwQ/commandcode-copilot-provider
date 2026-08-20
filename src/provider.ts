@@ -17,7 +17,11 @@ import type { ModelPreset, CommandCodeModelItem } from "./types";
 import { createRetryConfig, executeWithRetry, convertToolsToOpenAI } from "./utils";
 import { getCatalogProviderBaseUrl } from "./modelsDev";
 
-import { prepareLanguageModelChatInformation } from "./provideModel";
+import {
+    forceRefreshLanguageModelChatInformation,
+    prepareLanguageModelChatInformation,
+    type ModelRefreshResult,
+} from "./provideModel";
 import { getCatalogModelConfig, resolveVisionProxyModelId } from "./catalogModels";
 import { l10nFormat } from "./localize";
 import { countMessageTokens, textTokenLength } from "./provideToken";
@@ -84,6 +88,9 @@ function getRequestedReasoningEffort(options: ProvideLanguageModelChatResponseOp
  * VS Code Chat provider backed by CommandCode API.
  */
 export class CommandCodeChatModelProvider implements LanguageModelChatProvider {
+    private readonly _onDidChangeLanguageModelChatInformation = new vscode.EventEmitter<void>();
+    readonly onDidChangeLanguageModelChatInformation = this._onDidChangeLanguageModelChatInformation.event;
+
     /** Track last request completion time for delay calculation. */
     private _lastRequestTime: number | null = null;
 
@@ -122,6 +129,16 @@ export class CommandCodeChatModelProvider implements LanguageModelChatProvider {
     ): Promise<LanguageModelChatInformation[]> {
         void _token;
         return prepareLanguageModelChatInformation(options, _token, this.secrets);
+    }
+
+    async refreshLanguageModels(token: CancellationToken): Promise<ModelRefreshResult> {
+        const result = await forceRefreshLanguageModelChatInformation(token, this.secrets);
+        this._onDidChangeLanguageModelChatInformation.fire();
+        return result;
+    }
+
+    dispose(): void {
+        this._onDidChangeLanguageModelChatInformation.dispose();
     }
 
     /**
@@ -209,6 +226,7 @@ export class CommandCodeChatModelProvider implements LanguageModelChatProvider {
                         const matchedPreset = presets.find((p) => p.id === tempPreset);
                         if (matchedPreset) {
                             um.temperature = matchedPreset.temperature;
+                            um.top_p = matchedPreset.top_p;
                         }
                     } else {
                         const userTemperature = config.get<number | null>("commandcode.temperature", null);
@@ -954,6 +972,10 @@ export class CommandCodeChatModelProvider implements LanguageModelChatProvider {
             if (entered && entered.trim()) {
                 apiKey = entered.trim();
                 await this.secrets.store("commandcode.apiKey", apiKey);
+                const refreshTokenSource = new vscode.CancellationTokenSource();
+                void this.refreshLanguageModels(refreshTokenSource.token)
+                    .catch((error) => logger.error("models.apiKeyRefresh.failed", { error: String(error) }))
+                    .finally(() => refreshTokenSource.dispose());
             }
         }
 
