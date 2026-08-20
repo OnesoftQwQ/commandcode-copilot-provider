@@ -7,14 +7,21 @@ import { AnthropicApi } from "../anthropic/anthropicApi";
 import { getCatalogModelConfig } from "../catalogModels";
 import { getCatalogProviderBaseUrl } from "../modelsDev";
 import { logger } from "../logger";
-import { l10n } from "../localize";
+import { l10n, l10nFormat } from "../localize";
 import type { CommandCodeModelItem } from "../types";
 
 /**
  * Git commit message generator module.
  */
 
-let commitGenerationAbortController: AbortController | undefined;
+interface ActiveCommitGeneration {
+    cancellation: vscode.CancellationTokenSource;
+    abortController?: AbortController;
+}
+
+let activeCommitGeneration: ActiveCommitGeneration | undefined;
+
+type ApiKeyChangedCallback = () => void | Promise<void>;
 
 const DEFAULT_PROMPT = {
     system:
@@ -23,8 +30,22 @@ const DEFAULT_PROMPT = {
     styleReference: "\n\nRecent commit messages in this repository (match their style):\n{{RECENT_COMMITS}}",
 };
 
-export async function generateCommitMsg(secrets: vscode.SecretStorage, scm?: vscode.SourceControl) {
+export async function generateCommitMsg(
+    secrets: vscode.SecretStorage,
+    scm?: vscode.SourceControl,
+    onApiKeyChanged?: ApiKeyChangedCallback,
+): Promise<void> {
+    if (activeCommitGeneration) {
+        vscode.window.showInformationMessage(l10n("A commit message is already being generated."));
+        return;
+    }
+
+    const session: ActiveCommitGeneration = { cancellation: new vscode.CancellationTokenSource() };
+    activeCommitGeneration = session;
+    await vscode.commands.executeCommand("setContext", "commandcode.isGeneratingCommit", true);
+
     try {
+        throwIfCanceled(session.cancellation.token);
         const gitExtension = vscode.extensions.getExtension("vscode.git")?.exports;
         if (!gitExtension) {
             throw new Error(l10n("Git extension not found"));
@@ -42,19 +63,36 @@ export async function generateCommitMsg(secrets: vscode.SecretStorage, scm?: vsc
                 throw new Error(l10n("Repository not found for provided SCM"));
             }
 
-            await generateCommitMsgForRepository(secrets, repository);
+            await generateCommitMsgForRepository(secrets, repository, session, onApiKeyChanged);
             return;
         }
 
-        await orchestrateWorkspaceCommitMsgGeneration(secrets, git.repositories);
+        await orchestrateWorkspaceCommitMsgGeneration(secrets, git.repositories, session, onApiKeyChanged);
     } catch (error) {
+        if (isCancellationError(error, session.cancellation.token)) {
+            vscode.window.showInformationMessage(l10n("Commit message generation canceled."));
+            return;
+        }
         const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error("commit.error", { error: errorMessage });
         vscode.window.showErrorMessage(`${l10n("[Commit Generation Failed]")} ${errorMessage}`);
+    } finally {
+        if (activeCommitGeneration === session) {
+            activeCommitGeneration = undefined;
+        }
+        session.abortController?.abort();
+        session.cancellation.dispose();
+        await vscode.commands.executeCommand("setContext", "commandcode.isGeneratingCommit", false);
     }
 }
 
-async function orchestrateWorkspaceCommitMsgGeneration(secrets: vscode.SecretStorage, repos: any[]) {
-    const reposWithChanges = await filterForReposWithChanges(repos);
+async function orchestrateWorkspaceCommitMsgGeneration(
+    secrets: vscode.SecretStorage,
+    repos: any[],
+    session: ActiveCommitGeneration,
+    onApiKeyChanged?: ApiKeyChangedCallback,
+): Promise<void> {
+    const reposWithChanges = await filterForReposWithChanges(repos, session.cancellation.token);
 
     if (reposWithChanges.length === 0) {
         vscode.window.showInformationMessage(l10n("No changes found in any workspace repositories."));
@@ -63,46 +101,63 @@ async function orchestrateWorkspaceCommitMsgGeneration(secrets: vscode.SecretSto
 
     if (reposWithChanges.length === 1) {
         const repo = reposWithChanges[0];
-        await generateCommitMsgForRepository(secrets, repo);
+        await generateCommitMsgForRepository(secrets, repo, session, onApiKeyChanged);
         return;
     }
 
-    const selection = await promptRepoSelection(reposWithChanges);
+    const selection = await promptRepoSelection(reposWithChanges, session.cancellation.token);
 
     if (!selection) {
+        throwIfCanceled(session.cancellation.token);
         return;
     }
 
     if (selection.repo === null) {
         for (const repo of reposWithChanges) {
+            throwIfCanceled(session.cancellation.token);
             try {
-                await generateCommitMsgForRepository(secrets, repo);
+                await generateCommitMsgForRepository(secrets, repo, session, onApiKeyChanged);
             } catch (error) {
-                console.error(`Failed to generate commit message for ${repo.rootUri.fsPath}:`, error);
+                if (isCancellationError(error, session.cancellation.token)) {
+                    throw error;
+                }
+                const repoName = path.basename(repo.rootUri.fsPath) || l10n("repository");
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                logger.error("commit.repository.error", { repository: repo.rootUri.fsPath, error: errorMessage });
+                vscode.window.showErrorMessage(l10nFormat(
+                    "Failed to generate a commit message for {0}: {1}",
+                    repoName,
+                    errorMessage,
+                ));
             }
         }
     } else {
-        await generateCommitMsgForRepository(secrets, selection.repo);
+        await generateCommitMsgForRepository(secrets, selection.repo, session, onApiKeyChanged);
     }
 }
 
-async function filterForReposWithChanges(repos: any[]) {
+async function filterForReposWithChanges(repos: any[], token: vscode.CancellationToken): Promise<any[]> {
     const reposWithChanges = [];
 
     for (const repo of repos) {
+        throwIfCanceled(token);
         try {
             const gitDiff = await getGitDiff(repo.rootUri.fsPath);
+            throwIfCanceled(token);
             if (gitDiff) {
                 reposWithChanges.push(repo);
             }
-        } catch {
+        } catch (error) {
+            if (isCancellationError(error, token)) {
+                throw error;
+            }
             // Skip repositories with errors
         }
     }
     return reposWithChanges;
 }
 
-async function promptRepoSelection(repos: any[]) {
+async function promptRepoSelection(repos: any[], token: vscode.CancellationToken) {
     const repoItems = repos.map((repo) => ({
         label: repo.rootUri.fsPath.split(path.sep).pop() || repo.rootUri.fsPath,
         description: repo.rootUri.fsPath,
@@ -110,41 +165,67 @@ async function promptRepoSelection(repos: any[]) {
     }));
 
     repoItems.unshift({
-        label: "$(git-commit) Generate for all repositories with changes",
-        description: `Generate commit messages for ${repos.length} repositories`,
+        label: `$(git-commit) ${l10n("Generate for all repositories with changes")}`,
+        description: l10nFormat("Generate commit messages for {0} repositories", repos.length),
         repo: null as any,
     });
 
     return await vscode.window.showQuickPick(repoItems, {
-        placeHolder: "Select repository for commit message generation",
-    });
+        placeHolder: l10n("Select repository for commit message generation"),
+        ignoreFocusOut: true,
+    }, token);
 }
 
-async function generateCommitMsgForRepository(secrets: vscode.SecretStorage, repository: any) {
+async function generateCommitMsgForRepository(
+    secrets: vscode.SecretStorage,
+    repository: any,
+    session: ActiveCommitGeneration,
+    onApiKeyChanged?: ApiKeyChangedCallback,
+): Promise<void> {
     const inputBox = repository.inputBox;
     const repoPath = repository.rootUri.fsPath;
     const gitDiff = await getGitDiff(repoPath);
+    throwIfCanceled(session.cancellation.token);
 
     if (!gitDiff) {
-        throw new Error(`No changes in repository ${repoPath.split(path.sep).pop() || "repository"} for commit message`);
+        throw new Error(l10nFormat(
+            "No changes in repository {0} for commit message",
+            repoPath.split(path.sep).pop() || l10n("repository"),
+        ));
     }
 
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.SourceControl,
-            title: `Generating commit message for ${repoPath.split(path.sep).pop() || "repository"}...`,
+            title: l10nFormat(
+                "Generating commit message for {0}...",
+                repoPath.split(path.sep).pop() || l10n("repository"),
+            ),
             cancellable: true,
         },
-        (_, token) => {
-            token.onCancellationRequested(() => {
-                commitGenerationAbortController?.abort();
-            });
-            return performCommitMsgGeneration(secrets, gitDiff, inputBox, repoPath);
+        async (_, token) => {
+            const cancellation = token.onCancellationRequested(() => session.cancellation.cancel());
+            try {
+                return await performCommitMsgGeneration(
+                    secrets,
+                    gitDiff,
+                    inputBox,
+                    session,
+                    repoPath,
+                    onApiKeyChanged,
+                );
+            } finally {
+                cancellation.dispose();
+            }
         }
     );
 }
 
-async function ensureApiKey(secrets: vscode.SecretStorage): Promise<string | undefined> {
+async function ensureApiKey(
+    secrets: vscode.SecretStorage,
+    token: vscode.CancellationToken,
+    onApiKeyChanged?: ApiKeyChangedCallback,
+): Promise<string | undefined> {
     let apiKey = await secrets.get("commandcode.apiKey");
 
     if (!apiKey) {
@@ -153,21 +234,34 @@ async function ensureApiKey(secrets: vscode.SecretStorage): Promise<string | und
             prompt: l10n("Enter your CommandCode API key"),
             ignoreFocusOut: true,
             password: true,
-        });
-        if (entered && entered.trim()) {
-            apiKey = entered.trim();
-            await secrets.store("commandcode.apiKey", apiKey);
+        }, token);
+        if (entered === undefined) {
+            throwIfCanceled(token);
+            throw new vscode.CancellationError();
         }
+        if (!entered.trim()) {
+            throw new vscode.CancellationError();
+        }
+        apiKey = entered.trim();
+        await secrets.store("commandcode.apiKey", apiKey);
+        await onApiKeyChanged?.();
     }
 
     return apiKey;
 }
 
-async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff: string, inputBox: any, repoPath?: string) {
+async function performCommitMsgGeneration(
+    secrets: vscode.SecretStorage,
+    gitDiff: string,
+    inputBox: any,
+    session: ActiveCommitGeneration,
+    repoPath?: string,
+    onApiKeyChanged?: ApiKeyChangedCallback,
+): Promise<void> {
     const startTime = Date.now();
     let modelId: string | undefined;
     try {
-        vscode.commands.executeCommand("setContext", "commandcode.isGeneratingCommit", true);
+        throwIfCanceled(session.cancellation.token);
         const config = vscode.workspace.getConfiguration();
 
         const customSystemPrompt = config.get<string>("commandcode.commitMessagePrompt", "");
@@ -178,6 +272,7 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
         const includeCommitDiff = config.get<boolean>("commandcode.commitIncludeCommitDiff", false);
         if (recentCommitsCount > 0 && repoPath) {
             const recentCommits = await getRecentCommits(repoPath, recentCommitsCount, { includeDiff: includeCommitDiff });
+            throwIfCanceled(session.cancellation.token);
             if (recentCommits) {
                 const styleRef = includeCommitDiff
                     ? "\n\nRecent commit messages and their changes in this repository (match their style):\n{{RECENT_COMMITS}}"
@@ -236,7 +331,8 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
         modelId = selectedModel.id;
         logger.info("commit.start", { modelId });
 
-        const apiKey = await ensureApiKey(secrets);
+        const apiKey = await ensureApiKey(secrets, session.cancellation.token, onApiKeyChanged);
+        throwIfCanceled(session.cancellation.token);
         if (!apiKey) {
             throw new Error(l10n("CommandCode API key not found"));
         }
@@ -274,37 +370,65 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
             ? new AnthropicApi(modelId)
             : new OpenaiApi(modelId);
 
-        commitGenerationAbortController = new AbortController();
-        const stream = apiInstance.createMessage(selectedModel, systemPrompt, messages, baseUrl, apiKey, commitGenerationAbortController.signal);
+        const abortController = new AbortController();
+        session.abortController = abortController;
+        const cancellation = session.cancellation.token.onCancellationRequested(() => abortController.abort());
+        const stream = apiInstance.createMessage(selectedModel, systemPrompt, messages, baseUrl, apiKey, abortController.signal);
 
         let response = "";
-        for await (const chunk of stream) {
-            commitGenerationAbortController.signal.throwIfAborted();
-            if (chunk.type === "text") {
-                response += chunk.text;
-                inputBox.value = extractCommitMessage(response);
+        try {
+            for await (const chunk of stream) {
+                abortController.signal.throwIfAborted();
+                if (chunk.type === "text") {
+                    response += chunk.text;
+                    const partialMessage = extractCommitMessage(response);
+                    if (partialMessage) {
+                        inputBox.value = partialMessage;
+                    }
+                }
+            }
+        } finally {
+            cancellation.dispose();
+            if (session.abortController === abortController) {
+                session.abortController = undefined;
             }
         }
 
-        inputBox.value = removeThinkTags(inputBox.value);
+        const finalMessage = removeThinkTags(extractCommitMessage(response));
 
-        if (!inputBox.value) {
+        if (!finalMessage) {
             throw new Error(l10n("empty API response"));
         }
+        inputBox.value = finalMessage;
 
         logger.info("commit.end", { modelId, durationMs: Date.now() - startTime });
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.error("commit.error", { modelId: modelId ?? "unknown", error: errorMessage });
-        vscode.window.showErrorMessage(`${l10n("Failed to generate commit message:")} ${errorMessage}`);
-    } finally {
-        vscode.commands.executeCommand("setContext", "commandcode.isGeneratingCommit", false);
+        if (isCancellationError(error, session.cancellation.token)) {
+            logger.info("commit.canceled", { modelId: modelId ?? "unknown" });
+        } else {
+            logger.error("commit.error", { modelId: modelId ?? "unknown", error: errorMessage });
+        }
+        throw error;
     }
 }
 
 export function abortCommitGeneration() {
-    commitGenerationAbortController?.abort();
-    vscode.commands.executeCommand("setContext", "commandcode.isGeneratingCommit", false);
+    activeCommitGeneration?.cancellation.cancel();
+    activeCommitGeneration?.abortController?.abort();
+}
+
+function throwIfCanceled(token: vscode.CancellationToken): void {
+    if (token.isCancellationRequested) {
+        throw new vscode.CancellationError();
+    }
+}
+
+function isCancellationError(error: unknown, token: vscode.CancellationToken): boolean {
+    return token.isCancellationRequested
+        || error instanceof vscode.CancellationError
+        || (error instanceof DOMException && error.name === "AbortError")
+        || (error instanceof Error && error.name === "AbortError");
 }
 
 function extractCommitMessage(str: string): string {

@@ -94,7 +94,12 @@ export function activate(context: vscode.ExtensionContext) {
     // Register the generateGitCommitMessage command handler
     context.subscriptions.push(
         vscode.commands.registerCommand("commandcode.generateGitCommitMessage", async (scm) => {
-            generateCommitMsg(context.secrets, scm);
+            await generateCommitMsg(context.secrets, scm, () => {
+                const refreshTokenSource = new vscode.CancellationTokenSource();
+                void provider.refreshLanguageModels(refreshTokenSource.token)
+                    .catch((error) => logger.error("models.apiKeyRefresh.failed", { error: String(error) }))
+                    .finally(() => refreshTokenSource.dispose());
+            });
         }),
         vscode.commands.registerCommand("commandcode.abortGitCommitMessage", () => {
             abortCommitGeneration();
