@@ -50,15 +50,35 @@ let cumulativeInputTokens = 0;
 let cumulativeOutputTokens = 0;
 let cumulativeCacheHitTokens = 0;
 let cumulativeCacheMissTokens = 0;
-function initStatusBar(context, _secrets) {
-    void _secrets;
+const TOKEN_INDICATOR_SETTING = "commandcode.enableThirdPartyTokenIndicator";
+function isTokenIndicatorEnabled() {
+    return vscode.workspace.getConfiguration().get(TOKEN_INDICATOR_SETTING, true);
+}
+function applyStatusBarVisibility(item, resetOnShow = false) {
+    if (isTokenIndicatorEnabled()) {
+        if (resetOnShow) {
+            resetCumulativeCounters();
+            updateCumulativeTooltip(item);
+        }
+        item.show();
+    }
+    else {
+        item.hide();
+    }
+}
+function initStatusBar(context) {
     resetCumulativeCounters();
     const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     item.name = (0, localize_1.l10n)("Token Usage");
     item.text = "$(symbol-numeric) CommandCode";
-    item.tooltip = (0, localize_1.l10n)("Token usage");
+    updateCumulativeTooltip(item);
     context.subscriptions.push(item);
-    item.show();
+    applyStatusBarVisibility(item);
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration(TOKEN_INDICATOR_SETTING)) {
+            applyStatusBarVisibility(item, isTokenIndicatorEnabled());
+        }
+    }));
     logger_1.logger.debug("statusBar.init", { provider: "commandcode" });
     return item;
 }
@@ -116,14 +136,14 @@ function recordUsage(usage) {
 }
 function updateCumulativeTooltip(statusBarItem) {
     const lines = [];
-    let inputLine = `↑ ${formatTokenCount(cumulativeInputTokens)}`;
+    let inputLine = `${(0, localize_1.l10n)("Input")}: ${formatTokenCount(cumulativeInputTokens)}`;
     if (cumulativeCacheHitTokens > 0 || cumulativeCacheMissTokens > 0) {
         const totalCache = cumulativeCacheHitTokens + cumulativeCacheMissTokens;
         const hitRate = totalCache > 0 ? Math.round((cumulativeCacheHitTokens / totalCache) * 100) : 0;
         inputLine += ` ${(0, localize_1.l10nFormat)("({0} cached, {1}%)", formatTokenCount(cumulativeCacheHitTokens), hitRate)}`;
     }
     lines.push(inputLine);
-    lines.push(`↓ ${formatTokenCount(cumulativeOutputTokens)}`);
+    lines.push(`${(0, localize_1.l10n)("Output")}: ${formatTokenCount(cumulativeOutputTokens)}`);
     statusBarItem.tooltip = lines.join("\n");
 }
 //# sourceMappingURL=statusBar.js.map
