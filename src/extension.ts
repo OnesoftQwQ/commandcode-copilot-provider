@@ -25,11 +25,14 @@ export function activate(context: vscode.ExtensionContext) {
     // Initialize TokenizerManager with extension path
     TokenizerManager.initialize(context.extensionPath);
 
-    const tokenCountStatusBarItem: vscode.StatusBarItem = initStatusBar(context, context.secrets);
+    const tokenCountStatusBarItem: vscode.StatusBarItem = initStatusBar(context);
     const provider = new CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
 
     // Register the CommandCode provider under the vendor id used in package.json
-    vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
+    context.subscriptions.push(
+        vscode.lm.registerLanguageModelChatProvider("commandcode", provider),
+        provider,
+    );
 
     // Management command to configure API key
     context.subscriptions.push(
@@ -48,10 +51,12 @@ export function activate(context: vscode.ExtensionContext) {
             if (!apiKey.trim()) {
                 await context.secrets.delete("commandcode.apiKey");
                 vscode.window.showInformationMessage(l10n("CommandCode API key cleared."));
+                await refreshModels(provider, false);
                 return;
             }
             await context.secrets.store("commandcode.apiKey", apiKey.trim());
             vscode.window.showInformationMessage(l10n("CommandCode API key saved."));
+            await refreshModels(provider, false);
         })
     );
 
@@ -59,11 +64,12 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand("commandcode.updateModelList", async () => {
             try {
-                // dummy silent option, not used
-                resetAutoDiscoveryState();
-                await prepareLanguageModelChatInformation({ silent: true }, new vscode.CancellationTokenSource().token, context.secrets);
-                vscode.window.showInformationMessage(l10n("CommandCode model list updated successfully."));
+                await refreshModels(provider, true);
             } catch (error) {
+                if (error instanceof vscode.CancellationError) {
+                    vscode.window.showInformationMessage(l10n("CommandCode model list refresh canceled."));
+                    return;
+                }
                 logger.error("models.update.failed", { error: String(error) });
                 vscode.window.showErrorMessage(l10n("Failed to update CommandCode model list. See output for details."));
             }
@@ -72,15 +78,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Command to open the CommandCode website to get an API key
     context.subscriptions.push(
-        vscode.commands.registerCommand("commandcode.getApiKey", () => {
-        vscode.env.openExternal(vscode.Uri.parse("https://commandcode.ai"));
+        vscode.commands.registerCommand("commandcode.getApiKey", async () => {
+            await vscode.env.openExternal(vscode.Uri.parse("https://commandcode.ai"));
         })
     );
 
     // Command to open extension settings
     context.subscriptions.push(
-        vscode.commands.registerCommand("commandcode.openSettings", () => {
-            vscode.commands.executeCommand("workbench.action.openSettings", "@ext:OnesoftQwQ.commandcode-copilot-provider");
+        vscode.commands.registerCommand("commandcode.openSettings", async () => {
+            await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:OnesoftQwQ.commandcode-copilot-provider");
         })
     );
 
@@ -224,6 +230,33 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
+    const modelDiscoverySettings = [
+        "commandcode.enableAutoModelDiscovery",
+        "commandcode.showDeprecatedModels",
+        "commandcode.modelsDevMirrorUrl",
+        "commandcode.modelsDevMirrorToken",
+    ];
+    let settingsRefreshTokenSource: vscode.CancellationTokenSource | undefined;
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!modelDiscoverySettings.some((key) => event.affectsConfiguration(key))) {
+            return;
+        }
+        settingsRefreshTokenSource?.cancel();
+        settingsRefreshTokenSource?.dispose();
+        settingsRefreshTokenSource = new vscode.CancellationTokenSource();
+        void provider.refreshLanguageModels(settingsRefreshTokenSource.token).catch((error) => {
+            if (!(error instanceof vscode.CancellationError)) {
+                logger.error("models.settingsRefresh.failed", { error: String(error) });
+            }
+        });
+    }));
+    context.subscriptions.push({
+        dispose: () => {
+            settingsRefreshTokenSource?.cancel();
+            settingsRefreshTokenSource?.dispose();
+        },
+    });
+
     // Show welcome walkthrough on first install (when no API key is configured)
     showWelcomeIfNeeded(context);
 
@@ -257,3 +290,48 @@ async function showWelcomeIfNeeded(context: vscode.ExtensionContext): Promise<vo
 }
 
 export function deactivate() { }
+
+function getConfigurationTarget(
+    config: vscode.WorkspaceConfiguration,
+    key: string,
+): vscode.ConfigurationTarget {
+    const inspected = config.inspect(key);
+    if (inspected?.workspaceFolderValue !== undefined) {
+        return vscode.ConfigurationTarget.WorkspaceFolder;
+    }
+    if (inspected?.workspaceValue !== undefined) {
+        return vscode.ConfigurationTarget.Workspace;
+    }
+    return vscode.ConfigurationTarget.Global;
+}
+
+async function refreshModels(provider: CommandCodeChatModelProvider, announceResult: boolean) {
+    const result = await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: l10n("Refreshing CommandCode model list..."),
+            cancellable: announceResult,
+        },
+        async (_progress, token) => provider.refreshLanguageModels(token),
+    );
+
+    if (!announceResult) {
+        return result;
+    }
+
+    if (result.status === "api") {
+        vscode.window.showInformationMessage(
+            l10nFormat("CommandCode model list updated successfully ({0} models).", result.models.length),
+        );
+    } else if (result.status === "auto-discovery-disabled") {
+        vscode.window.showWarningMessage(l10n("Automatic model discovery is disabled; using the built-in model list."));
+    } else if (result.status === "missing-api-key") {
+        vscode.window.showWarningMessage(l10n("No CommandCode API key is configured; using the built-in model list."));
+    } else {
+        vscode.window.showWarningMessage(l10nFormat(
+            "Unable to load the live model list; using {0} fallback models.",
+            result.models.length,
+        ));
+    }
+    return result;
+}
