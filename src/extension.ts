@@ -7,7 +7,8 @@ import type { ModelPreset } from "./types";
 import { VersionManager } from "./versionManager";
 import { abortCommitGeneration, generateCommitMsg } from "./gitCommit/commitMessageGenerator";
 import { TokenizerManager } from "./tokenizer/tokenizerManager";
-import { prepareLanguageModelChatInformation, resetAutoDiscoveryState } from "./provideModel";
+import { prepareLanguageModelChatInformation } from "./provideModel";
+import { formatCustomPresetInput, parseCustomPresetInput } from "./modelPreset";
 
 // ---- Walkthrough / Welcome constants ----
 
@@ -103,21 +104,28 @@ export function activate(context: vscode.ExtensionContext) {
     // Register the setModelPreset command: user can select a preset via QuickPick
     context.subscriptions.push(
         vscode.commands.registerCommand("commandcode.setModelPreset", async () => {
-            const config = vscode.workspace.getConfiguration();
-            const presets = config.get<ModelPreset[]>("commandcode.modelPresets", []);
-            const currentPresetId = config.get<string>("commandcode.modelPreset", "custom");
-            const currentTemp = config.get<number | null>("commandcode.temperature", null);
-            const currentTopP = config.get<number | null>("commandcode.top_p", null);
+            const resource = vscode.window.activeTextEditor?.document.uri;
+            const config = vscode.workspace.getConfiguration("commandcode", resource);
+            const presets = config.get<ModelPreset[]>("modelPresets", []);
+            const currentPresetId = config.get<string>("modelPreset", "custom");
+            const currentTemp = config.get<number | null>("temperature", null);
+            const currentTopP = config.get<number | null>("top_p", null);
 
             interface PresetQuickPickItem extends vscode.QuickPickItem {
-                presetId?: string;
+                action?: { kind: "preset"; preset: ModelPreset } | { kind: "custom" };
             }
 
             // Mark the currently active preset with " (当前)"
-            const presetItems: PresetQuickPickItem[] = presets.map((p) => ({
-                label: `${l10n(p.label)} (${p.temperature})${p.id === currentPresetId ? l10n(" (current)") : ""}`,
-                presetId: p.id,
-            }));
+            const presetItems: PresetQuickPickItem[] = presets
+                .filter((preset) => preset.id.trim() && Number.isFinite(preset.temperature))
+                .map((preset) => ({
+                    label: `${l10n(preset.label)} (${l10nFormat(
+                        preset.top_p === undefined ? "temperature: {0}" : "temperature: {0}, top_p: {1}",
+                        preset.temperature,
+                        ...(preset.top_p === undefined ? [] : [preset.top_p]),
+                    )})${preset.id === currentPresetId ? l10n(" (current)") : ""}`,
+                    action: { kind: "preset", preset },
+                }));
 
             // Mark custom option with current values if active
             const isCustomActive = currentPresetId === "custom";
@@ -128,6 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             const customItem: PresetQuickPickItem = {
                 label: customLabel,
+                action: { kind: "custom" },
             };
 
             const items: PresetQuickPickItem[] = [
@@ -148,65 +157,47 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const presetId = picked.presetId;
-
-            if (presetId) {
+            if (picked.action?.kind === "preset") {
                 // User selected a named preset
-                const matchedPreset = presets.find((p) => p.id === presetId);
-                if (matchedPreset) {
-                    await config.update("commandcode.modelPreset", matchedPreset.id, vscode.ConfigurationTarget.Global);
-                    await config.update("commandcode.temperature", matchedPreset.temperature, vscode.ConfigurationTarget.Global);
-                    vscode.window.showInformationMessage(
-                        l10nFormat("Set to temperature: {0} ({1})", String(matchedPreset.temperature), l10n(matchedPreset.label))
-                    );
-                }
-            } else {
+                const matchedPreset = picked.action.preset;
+                await config.update("modelPreset", matchedPreset.id, getConfigurationTarget(config, "modelPreset"));
+                vscode.window.showInformationMessage(
+                    matchedPreset.top_p === undefined
+                        ? l10nFormat("Set to temperature: {0} ({1})", matchedPreset.temperature, l10n(matchedPreset.label))
+                        : l10nFormat(
+                            "Set to temp: {0}, top_p: {1} ({2})",
+                            matchedPreset.temperature,
+                            matchedPreset.top_p,
+                            l10n(matchedPreset.label),
+                        ),
+                );
+            } else if (picked.action?.kind === "custom") {
                 // User chose "Custom (manual input)"
-                const currentVal = currentTemp !== null && currentTopP !== null
-                    ? `${currentTemp},${currentTopP}`
-                    : "";
                 const inputValue = await vscode.window.showInputBox({
                     title: l10n("Enter custom temperature"),
                     prompt: l10n("Enter a single number for temperature only (<=2), or two comma-separated numbers for temperature and top_p (temp<=2, top_p<=1), e.g.: 0.7 or 0.7,0.95"),
-                    value: currentVal,
+                    value: formatCustomPresetInput(currentTemp, currentTopP),
                     validateInput: (val: string) => {
-                        const trimmed = val.trim();
-                        if (!trimmed) {
-                            return l10n("Please enter at least temperature value");
-                        }
-                        const parts = trimmed.split(",");
-                        if (parts.length > 2) {
-                            return l10n("Please enter at most two numbers separated by a comma");
-                        }
-                        const temp = parseFloat(parts[0].trim());
-                        if (isNaN(temp) || temp < 0 || temp > 2) {
-                            return l10n("Temperature must be between 0.0 and 2.0");
-                        }
-                        if (parts.length === 2) {
-                            const topP = parseFloat(parts[1].trim());
-                            if (isNaN(topP) || topP < 0 || topP > 1) {
-                                return l10n("top_p must be between 0.0 and 1.0");
-                            }
-                        }
-                        return null;
+                        const parsed = parseCustomPresetInput(val);
+                        return parsed.error ? l10n(parsed.error) : null;
                     },
                     ignoreFocusOut: true,
                 });
                 if (inputValue !== undefined) {
-                    const trimmed = inputValue.trim();
-                    const parts = trimmed.split(",");
-                    const tempNum = parseFloat(parts[0].trim());
-                    await config.update("commandcode.modelPreset", "custom", vscode.ConfigurationTarget.Global);
-                    await config.update("commandcode.temperature", tempNum, vscode.ConfigurationTarget.Global);
-                    if (parts.length === 2) {
-                        const topPNum = parseFloat(parts[1].trim());
-                        await config.update("commandcode.top_p", topPNum, vscode.ConfigurationTarget.Global);
+                    const parsed = parseCustomPresetInput(inputValue);
+                    if (!parsed.value) {
+                        return;
+                    }
+                    await config.update("modelPreset", "custom", getConfigurationTarget(config, "modelPreset"));
+                    await config.update("temperature", parsed.value.temperature, getConfigurationTarget(config, "temperature"));
+                    await config.update("top_p", parsed.value.topP ?? null, getConfigurationTarget(config, "top_p"));
+                    if (parsed.value.topP !== undefined) {
                         vscode.window.showInformationMessage(
-                            l10nFormat("Set to temp: {0}, top_p: {1} (custom)", String(tempNum), String(topPNum))
+                            l10nFormat("Set to temp: {0}, top_p: {1} (custom)", parsed.value.temperature, parsed.value.topP)
                         );
                     } else {
                         vscode.window.showInformationMessage(
-                            l10nFormat("Set to temperature: {0} (custom)", String(tempNum))
+                            l10nFormat("Set to temperature: {0} (custom)", parsed.value.temperature)
                         );
                     }
                 }

@@ -226,6 +226,7 @@ export class CommandCodeChatModelProvider implements LanguageModelChatProvider {
                         const matchedPreset = presets.find((p) => p.id === tempPreset);
                         if (matchedPreset) {
                             um.temperature = matchedPreset.temperature;
+                            um.top_p = matchedPreset.top_p;
                         }
                     } else {
                         const userTemperature = config.get<number | null>("commandcode.temperature", null);
