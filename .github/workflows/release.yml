@@ -9,9 +9,9 @@ on:
           version sync.
         required: false
         type: string
-  push:
-    tags:
-      - 'v*'
+  # 注意：不要加 push tags 触发。发布 Release 时 GitHub 会先推 tag 再发
+  # release 事件，若同时监听两者会跑两次，且两次的"版本同步提交"会互相
+  # 竞争推 master 导致其中一个 run 失败。仅保留 release 触发。
   release:
     types: [published]
 
@@ -74,6 +74,9 @@ jobs:
               | head -1 | sed 's|.*origin/||' | xargs)
           fi
           if [ -n "$BRANCH" ]; then
+            # master 可能在此期间前进（例如其它提交刚被合并），先 rebase 再推，
+            # 避免 push 因 "fetch first" 被拒绝而让整个 release run 失败。
+            git pull --rebase origin "$BRANCH" || true
             git push origin "HEAD:refs/heads/$BRANCH"
           else
             echo "No remote branch found, skipping push."
@@ -93,7 +96,6 @@ jobs:
 
       # 解析要挂载 .vsix 的 Release tag：
       # - release 事件 → 该 Release 的 tag
-      # - tag 推送（v*）→ 触发 tag
       # - 手动触发且填了版本号 → v<版本号>
       # - 手动触发未填版本号 → 空（只构建并上传 artifact，不创建 Release）
       - name: Get tag name
@@ -101,16 +103,14 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "release" ]]; then
             echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           elif [ -n "${{ inputs.version }}" ]; then
             echo "tag=v${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
             echo "tag=" >> $GITHUB_OUTPUT
           fi
 
-      # 非 release 事件且解析到有效 tag 时创建草稿 Release（含默认介绍）
-      - name: Create draft Release (tag push / manual version)
+      # 非 release 事件且解析到有效 tag 时创建草稿 Release（手动触发 + 版本号）
+      - name: Create draft Release (manual version)
         if: github.event_name != 'release' && steps.tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
