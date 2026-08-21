@@ -24,7 +24,7 @@
 	"bugs": {
 		"url": "https://github.com/OnesoftQwQ/commandcode-copilot/issues"
 	},
-	"version": "1.9.1",
+	"version": "1.9.2",
 	"engines": {
 		"vscode": "^1.116.0"
 	},
@@ -194,7 +194,7 @@
 				},
 				"commandcode.commitModel": {
 					"type": "string",
-				"default": "deepseek/deepseek-v4-flash",
+					"default": "deepseek/deepseek-v4-flash",
 					"description": "%config.commitModel.desc%"
 				},
 				"commandcode.commitMessagePrompt": {
