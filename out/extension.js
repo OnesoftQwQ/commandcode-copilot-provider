@@ -53,12 +53,6 @@ function activate(context) {
     // Initialize logger
     logger_1.logger.init();
     logger_1.logger.info("extension.activate", { version: versionManager_1.VersionManager.getVersion() });
-    // Initialize TokenizerManager with extension path
-    tokenizerManager_1.TokenizerManager.initialize(context.extensionPath);
-    const tokenCountStatusBarItem = (0, statusBar_1.initStatusBar)(context, context.secrets);
-    const provider = new provider_1.CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
-    // Register the CommandCode provider under the vendor id used in package.json
-    vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
     // Management command to configure API key
     context.subscriptions.push(vscode.commands.registerCommand("commandcode.setApiKey", async () => {
         const existing = await context.secrets.get("commandcode.apiKey");
@@ -201,6 +195,24 @@ function activate(context) {
             }
         }
     }));
+    // Register the provider after management commands. Provider activation can fail
+    // on older VS Code builds or when another extension already owns the vendor id;
+    // the API-key command must remain available in either case.
+    try {
+        tokenizerManager_1.TokenizerManager.initialize(context.extensionPath);
+        const tokenCountStatusBarItem = (0, statusBar_1.initStatusBar)(context, context.secrets);
+        const provider = new provider_1.CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
+        if (typeof vscode.lm?.registerLanguageModelChatProvider !== "function") {
+            throw new Error("VS Code language model provider API is unavailable");
+        }
+        const registration = vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
+        context.subscriptions.push(registration);
+    }
+    catch (error) {
+        logger_1.logger.error("provider.registration.failed", {
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
     // Warm up model discovery on every activation (non-blocking, fire-and-forget).
     // VS Code may fire several activation events at startup; the short refresh
     // interval in prepareLanguageModelChatInformation (default 1 minute) dedupes

@@ -24,7 +24,7 @@
 	"bugs": {
 		"url": "https://github.com/OnesoftQwQ/commandcode-copilot/issues"
 	},
-	"version": "1.9.0",
+	"version": "1.9.1",
 	"engines": {
 		"vscode": "^1.116.0"
 	},
@@ -34,7 +34,14 @@
 	],
 	"license": "MIT",
 	"activationEvents": [
-		"onStartupFinished"
+		"onStartupFinished",
+		"onCommand:commandcode.setApiKey",
+		"onCommand:commandcode.getApiKey",
+		"onCommand:commandcode.openSettings",
+		"onCommand:commandcode.generateGitCommitMessage",
+		"onCommand:commandcode.abortGitCommitMessage",
+		"onCommand:commandcode.setModelPreset",
+		"onCommand:commandcode.updateModelList"
 	],
 	"contributes": {
 		"languageModelChatProviders": [

@@ -22,15 +22,6 @@ export function activate(context: vscode.ExtensionContext) {
     logger.init();
     logger.info("extension.activate", { version: VersionManager.getVersion() });
 
-    // Initialize TokenizerManager with extension path
-    TokenizerManager.initialize(context.extensionPath);
-
-    const tokenCountStatusBarItem: vscode.StatusBarItem = initStatusBar(context, context.secrets);
-    const provider = new CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
-
-    // Register the CommandCode provider under the vendor id used in package.json
-    vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
-
     // Management command to configure API key
     context.subscriptions.push(
         vscode.commands.registerCommand("commandcode.setApiKey", async () => {
@@ -207,6 +198,27 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // Register the provider after management commands. Provider activation can fail
+    // on older VS Code builds or when another extension already owns the vendor id;
+    // the API-key command must remain available in either case.
+    try {
+        TokenizerManager.initialize(context.extensionPath);
+
+        const tokenCountStatusBarItem: vscode.StatusBarItem = initStatusBar(context, context.secrets);
+        const provider = new CommandCodeChatModelProvider(context.secrets, tokenCountStatusBarItem);
+
+        if (typeof vscode.lm?.registerLanguageModelChatProvider !== "function") {
+            throw new Error("VS Code language model provider API is unavailable");
+        }
+
+        const registration = vscode.lm.registerLanguageModelChatProvider("commandcode", provider);
+        context.subscriptions.push(registration);
+    } catch (error) {
+        logger.error("provider.registration.failed", {
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
 
     // Warm up model discovery on every activation (non-blocking, fire-and-forget).
     // VS Code may fire several activation events at startup; the short refresh

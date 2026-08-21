@@ -36,10 +36,6 @@ jobs:
       - name: Run postinstall script (copy tokenizer)
         run: node scripts/copy-tokenizer.js
 
-      # 构建前刷新硬编码目录快照；失败时保留仓库内旧快照，不阻断构建
-      - name: Refresh hardcoded catalog snapshot
-        run: node scripts/update-hardcoded-catalog.mjs
-
       # 确定版本号来源：手动输入 > tag > 无
       - name: Resolve version
         id: ver
@@ -83,7 +79,7 @@ jobs:
         run: npm run compile
 
       - name: Package extension (.vsix)
-        run: npx @vscode/vsce package -o extension.vsix
+        run: npm run build
 
       - name: Get version from package.json
         id: version
@@ -109,7 +105,7 @@ jobs:
           name: Release ${{ steps.tag.outputs.tag }}
           body: |
             # ${{ steps.tag.outputs.tag }}
-            [CHANGELOG](https://github.com/OnesoftQwQ/opencode-go-copilot)
+            [CHANGELOG](https://github.com/OnesoftQwQ/commandcode-copilot-provider)
             了解详细变更。
           draft: true
           prerelease: false
@@ -131,7 +127,7 @@ jobs:
       - name: Upload .vsix as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: opencode-go-copilot-${{ steps.version.outputs.version }}.vsix
+          name: commandcode-copilot-provider-${{ steps.version.outputs.version }}.vsix
           path: extension.vsix
           if-no-files-found: error
 
@@ -141,4 +137,4 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           npx @vscode/vsce publish -p "$VSCE_PAT" \
-            --packagePath extension.vsix --allow-all-proposed-apis
+            --packagePath extension.vsix --allow-all-proposed-apis --no-dependencies
