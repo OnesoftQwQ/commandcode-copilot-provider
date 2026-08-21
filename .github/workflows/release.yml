@@ -137,4 +137,4 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           npx @vscode/vsce publish -p "$VSCE_PAT" \
-            --packagePath extension.vsix --allow-all-proposed-apis --no-dependencies
+            --packagePath extension.vsix --allow-all-proposed-apis
