@@ -279,15 +279,40 @@ export function getCatalogProviderBaseUrl(providerId: string, fallbackUrl: strin
  * Get provider-specific model metadata from the catalog.
  * Looks up the model in the specified provider's models section.
  *
+ * Matching is tolerant of the ID formats seen in the wild:
+ * - exact key match ("deepseek-v4-flash", "MiniMax-M3")
+ * - case-insensitive key match ("Kimi-K3" vs "kimi-k3")
+ * - case-insensitive short-ID match for fully qualified IDs
+ *   ("moonshotai/Kimi-K2.7-Code" → "kimi-k2.7-code")
+ * - "-free" suffix stripped ("poolside/laguna-s-2.1-free" → "laguna-s-2.1")
+ *
  * @param providerId - Provider ID (e.g. "commandcode")
- * @param modelId - Short model ID (e.g. "glm-5", "deepseek-v4-flash")
+ * @param modelId - Model ID (e.g. "deepseek-v4-flash", "moonshotai/Kimi-K3")
  * @returns The provider-specific model entry, or undefined if not found.
  */
 export function getCatalogProviderModelEntry(
     providerId: string,
     modelId: string
 ): ModelsDevEntry | undefined {
-    return providersMap?.get(providerId)?.models?.[modelId];
+    const models = providersMap?.get(providerId)?.models;
+    if (!models) return undefined;
+
+    if (models[modelId]) return models[modelId];
+
+    const lookupIds = modelId.endsWith("-free") ? [modelId, modelId.slice(0, -"-free".length)] : [modelId];
+    const lowerKeys = new Set(lookupIds.map((id) => id.toLowerCase()));
+    const lowerShorts = new Set(
+        lookupIds.map((id) => id.split("/").pop()?.toLowerCase()).filter((s): s is string => s !== undefined)
+    );
+
+    for (const [key, entry] of Object.entries(models)) {
+        const lowerKey = key.toLowerCase();
+        if (lowerKeys.has(lowerKey)) return entry;
+        const keyShort = key.split("/").pop()?.toLowerCase();
+        if (keyShort !== undefined && lowerShorts.has(keyShort)) return entry;
+    }
+
+    return undefined;
 }
 
 /**
@@ -307,13 +332,19 @@ export function getCatalogProviderModelIds(providerId: string): string[] {
  * Infer the thinking mode from a catalog model entry.
  *
  * - `reasoning: false` or missing → `"always"` (no thinking at all)
- * - `reasoning_options` is empty or missing → `"always"` (thinking always on, no user control)
- * - `reasoning_options` has entries → `"switchable"` (user can toggle)
+ * - `reasoning: true` with missing, empty, or populated `reasoning_options`
+ *   → `"switchable"` (user can toggle thinking on/off; effort levels are only
+ *   offered when an `effort` option declares them)
+ *
+ * Previously a reasoning model without `reasoning_options` was treated as
+ * `"always"` (thinking locked on, no way to disable). models.dev's global
+ * model entries carry no `reasoning_options` at all — they live only in
+ * provider-specific sections — so any model resolved from the global section
+ * ended up un-disableable. `"switchable"` keeps thinking on by default while
+ * restoring the user's ability to turn it off.
  */
 export function inferThinkingMode(entry: ModelsDevEntry): "switchable" | "always" | "adaptive" {
     if (!entry.reasoning) return "always";
-    const opts = entry.reasoning_options;
-    if (!opts || opts.length === 0) return "always";
     return "switchable";
 }
 
