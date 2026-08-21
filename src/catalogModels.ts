@@ -5,11 +5,16 @@
  * two-layer merge chain:
  *
  *   1. resolveFromCatalog() — models.dev catalog
- *      (provider entry → global entry → conservative defaults, per field)
+ *      (provider entry → vendor provider entry → global entry → conservative defaults, per field)
  *   2. applyOverride()      — MODEL_OVERRIDES[modelId] wins per field when present
  *
  * The live CommandCode `/models` endpoint supplies model IDs; models.dev is
- * used only as optional metadata.
+ * used only as optional metadata. models.dev has no "commandcode" provider
+ * entry (CommandCode is a private gateway), so reasoning metadata
+ * (`reasoning_options`) is resolved from the catalog section of the model's
+ * underlying vendor (deepseek/anthropic/openai/…), which is where models.dev
+ * actually stores it — the global `models` section carries no
+ * `reasoning_options` at all.
  */
 
 import type { LanguageModelChatInformation } from "vscode";
@@ -45,6 +50,60 @@ const DEFAULT_CONTEXT_LENGTH = 128000;
 const DEFAULT_MAX_TOKENS = 4096;
 
 /**
+ * models.dev provider IDs for the upstream vendors behind CommandCode's
+ * gateway. models.dev has no "commandcode" provider entry, and per-model
+ * reasoning data (`reasoning_options`: toggle / effort / budget_tokens) is
+ * stored only in the real vendors' provider sections — the global `models`
+ * section has none. When the CommandCode section is absent, fall back to the
+ * underlying vendor's section so thinking toggles/efforts are not lost.
+ * Ordered by specificity; the first matching rule wins.
+ */
+const VENDOR_PROVIDER_CANDIDATES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
+    // Prefix rules (fully qualified IDs as returned by the /models endpoint)
+    [/^deepseek\//i, ["deepseek"]],
+    [/^anthropic\//i, ["anthropic"]],
+    [/^openai\//i, ["openai"]],
+    [/^qwen\//i, ["alibaba", "alibaba-cn"]],
+    [/^minimaxai\//i, ["minimax", "minimax-cn"]],
+    [/^moonshotai\//i, ["moonshotai", "moonshotai-cn"]],
+    [/^poolside\//i, ["poolside"]],
+    [/^zai-org\//i, ["zai"]],
+    [/^google\//i, ["google"]],
+    [/^x-ai\//i, ["xai"]],
+    [/^mistral\//i, ["mistral"]],
+    [/^meta\//i, ["meta"]],
+    // Family rules (unprefixed IDs, e.g. "claude-sonnet-5")
+    [/^claude[-/]/i, ["anthropic"]],
+    [/^gpt[-0-9]/i, ["openai"]],
+    [/^o[0-9]-/i, ["openai"]],
+    [/^deepseek[-/]/i, ["deepseek"]],
+    [/^qwen/i, ["alibaba", "alibaba-cn"]],
+    [/^minimax/i, ["minimax", "minimax-cn"]],
+    [/^kimi/i, ["moonshotai", "moonshotai-cn"]],
+    [/^glm/i, ["zai"]],
+    [/^gemini/i, ["google"]],
+    [/^grok/i, ["xai"]],
+    [/^laguna/i, ["poolside"]],
+];
+
+/**
+ * Resolve the catalog entry of the underlying vendor for a model ID.
+ * Returns undefined when the model has no known vendor mapping or the vendor
+ * section has no matching entry.
+ */
+function getVendorProviderEntry(modelId: string): ModelsDevEntry | undefined {
+    for (const [pattern, providerIds] of VENDOR_PROVIDER_CANDIDATES) {
+        if (!pattern.test(modelId)) continue;
+        for (const providerId of providerIds) {
+            const entry = getCatalogProviderModelEntry(providerId, modelId);
+            if (entry) return entry;
+        }
+        return undefined;
+    }
+    return undefined;
+}
+
+/**
  * Resolved model metadata. Every field that the catalog can supply has a
  * conservative default, so the object is always complete.
  */
@@ -76,12 +135,13 @@ export function resolveProviderForModelId(modelId: string): ProviderId {
 
 /**
  * Resolve model metadata from the catalog with conservative defaults.
- * Per field: provider-specific entry → global entry → default.
+ * Per field: provider-specific entry → vendor entry → global entry → default.
  */
 function resolveFromCatalog(providerId: ProviderId, modelId: string): ModelMeta {
     const providerEntry = getCatalogProviderModelEntry(providerId, modelId);
+    const vendorEntry = getVendorProviderEntry(modelId);
     const globalEntry = lookupModelDevEntry(modelId);
-    const entry: ModelsDevEntry | undefined = providerEntry ?? globalEntry;
+    const entry: ModelsDevEntry | undefined = providerEntry ?? vendorEntry ?? globalEntry;
 
     const thinkingMode = entry ? inferThinkingMode(entry) : "switchable";
     const rawEfforts = entry ? inferReasoningEfforts(entry) : undefined;
