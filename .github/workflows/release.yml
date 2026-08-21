@@ -9,6 +9,9 @@ on:
           version sync.
         required: false
         type: string
+  push:
+    tags:
+      - 'v*'
   release:
     types: [published]
 
@@ -18,6 +21,7 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -87,18 +91,27 @@ jobs:
           VER=$(node -p "require('./package.json').version")
           echo "version=${VER}" >> $GITHUB_OUTPUT
 
+      # 解析要挂载 .vsix 的 Release tag：
+      # - release 事件 → 该 Release 的 tag
+      # - tag 推送（v*）→ 触发 tag
+      # - 手动触发且填了版本号 → v<版本号>
+      # - 手动触发未填版本号 → 空（只构建并上传 artifact，不创建 Release）
       - name: Get tag name
         id: tag
         run: |
           if [[ "${{ github.event_name }}" == "release" ]]; then
             echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-          else
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "tag=v${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=" >> $GITHUB_OUTPUT
           fi
 
-      # tag push 时创建草稿 Release（含默认介绍）
-      - name: Create draft Release (tag push)
-        if: github.event_name != 'release'
+      # 非 release 事件且解析到有效 tag 时创建草稿 Release（含默认介绍）
+      - name: Create draft Release (tag push / manual version)
+        if: github.event_name != 'release' && steps.tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -131,10 +144,12 @@ jobs:
           path: extension.vsix
           if-no-files-found: error
 
-      # 发布到 VS Code Marketplace
-      - name: Publish to VS Code Marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: |
-          npx @vscode/vsce publish -p "$VSCE_PAT" \
-            --packagePath extension.vsix --allow-all-proposed-apis
+      # 发布到 VS Code Marketplace —— 暂时停用：
+      # 启用前需先在仓库 Secrets 中配置 VSCE_PAT（VS Marketplace 发布者 PAT），
+      # 然后把下面整段注释去掉即可恢复。
+      # - name: Publish to VS Code Marketplace
+      #   env:
+      #     VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      #   run: |
+      #     npx @vscode/vsce publish -p "$VSCE_PAT" \
+      #       --packagePath extension.vsix --allow-all-proposed-apis
